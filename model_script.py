@@ -1,49 +1,18 @@
 import os
 from datetime import datetime
 import requests
-import shutil
-
-import torch
-
-# Libraries for pre and post processsing
-from ultralytics.yolo.data.augment import LetterBox
-from ultralytics.yolo.engine.results import Results
-from ultralytics.yolo.utils import ops
-# from ultralytics.yolo.utils.plotting import Annotator, colors
-
-# import onnx_runtime related package
 import onnxruntime as rt
-
 import numpy as np
 import cv2
 import base64
 
 class ModelHandler(object):
-    """
-    A YOLOV8 Model handler implementation.
-    """
     def __init__(self):
 
         self.initialized = False
-
-        # Parameters for inference
-        self.mlas_model = None
         self.ov_model = None
         self.input_names = None
         self.output_names = None
-
-        # Parameters for pre-processing
-        self.imgsz = 640 # default value for this usecase. 
-        self.stride = 32 # default value for this usecase( differs based on the model selected )
-
-        # Parameters for post-processing
-        self.conf = 0.30
-        self.iou = 0.45
-        self.max_det = 300
-        self.classes = None
-        self.agnostic = False
-        self.labels = {0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle', 4: 'airplane', 5: 'bus', 6: 'train', 7: 'truck', 8: 'boat', 9: 'traffic light', 10: 'fire hydrant', 11: 'stop sign', 12: 'parking meter', 13: 'bench', 14: 'bird', 15: 'cat', 16: 'dog', 17: 'horse', 18: 'sheep', 19: 'cow', 20: 'elephant', 21: 'bear', 22: 'zebra', 23: 'giraffe', 24: 'backpack', 25: 'umbrella', 26: 'handbag', 27: 'tie', 28: 'suitcase', 29: 'frisbee', 30: 'skis', 31: 'snowboard', 32: 'sports ball', 33: 'kite', 34: 'baseball bat', 35: 'baseball glove', 36: 'skateboard', 37: 'surfboard', 38: 'tennis racket', 39: 'bottle', 40: 'wine glass', 41: 'cup', 42: 'fork', 43: 'knife', 44: 'spoon', 45: 'bowl', 46: 'banana', 47: 'apple', 48: 'sandwich', 49: 'orange', 50: 'broccoli', 51: 'carrot', 52: 'hot dog', 53: 'pizza', 54: 'donut', 55: 'cake', 56: 'chair', 57: 'couch', 58: 'potted plant', 59: 'bed', 60: 'dining table', 61: 'toilet', 62: 'tv', 63: 'laptop', 64: 'mouse', 65: 'remote', 66: 'keyboard', 67: 'cell phone', 68: 'microwave', 69: 'oven', 70: 'toaster', 71: 'sink', 72: 'refrigerator', 73: 'book', 74: 'clock', 75: 'vase', 76: 'scissors', 77: 'teddy bear', 78: 'hair drier', 79: 'toothbrush'}
-
         self.path = '/home/raw-data/'
 
     def initialize(self, context):
@@ -52,9 +21,7 @@ class ModelHandler(object):
         properties = context.system_properties
         model_dir = properties.get("model_dir")
         so = rt.SessionOptions()
-        self.mlas_model = rt.InferenceSession(os.path.join(model_dir,'yolov8n.onnx'), so, providers=['CPUExecutionProvider'])
-        self.ov_model = rt.InferenceSession(os.path.join(model_dir,'yolov8n.onnx'), so, providers=['OpenVINOExecutionProvider'], provider_options=[{'device_type' : 'CPU_FP32'}]) 
-
+        self.ov_model = rt.InferenceSession(os.path.join(model_dir,'facenet512.onnx'), so, providers=['OpenVINOExecutionProvider'], provider_options=[{'device_type' : 'CPU_FP32'}]) 
         self.input_names = self.ov_model.get_inputs()[0].name
         outputs = self.ov_model.get_outputs()
         self.output_names = list(map(lambda output:output.name, outputs))
@@ -82,12 +49,7 @@ class ModelHandler(object):
                 return
 
             # Redimensionar com preenchimento
-            img = LetterBox(self.imgsz, True, stride=self.stride)(image=img0.copy())
-
-            # Converter de BGR para RGB e ajustar dimensões
-            img = img.transpose((2, 0, 1))[::-1]  # BGR para RGB, para 3x416x416
-            img = np.ascontiguousarray(img)
-
+            img = cv2.resize(img0, (160, 160))
             img = img.astype(np.float32)  # uint8 para fp16/32
             img /= 255.0  # 0 - 255 para 0.0 - 1.0
 
@@ -100,12 +62,7 @@ class ModelHandler(object):
             return
 
     def inference(self, model_input, device):
-        if device == 'cpu':
-            print("Performing ONNX Runtime Inference with default CPU EP.")
-            start_time = datetime.now()
-            prediction = self.mlas_model.run(self.output_names, {self.input_names: model_input})
-            end_time = datetime.now()
-        elif device == 'CPU_FP32':
+        if device == 'CPU_FP32':
             print("Performing ONNX Runtime Inference with OpenVINO CPU EP.")
             start_time = datetime.now()
             prediction = self.ov_model.run(self.output_names, {self.input_names: model_input})
@@ -118,40 +75,11 @@ class ModelHandler(object):
         if inference_output is not None:
             prediction = inference_output[0]
             inference_time = inference_output[1]
-
-            prediction = [torch.from_numpy(pred) for pred in prediction]
-            preds = ops.non_max_suppression(prediction,
-                                                    self.conf,
-                                                    self.iou,
-                                                    agnostic=self.agnostic,
-                                                    max_det=self.max_det,
-                                                    classes=self.classes)
-            log_string = ''
-            results = []
-            for _, pred in enumerate(preds):
-                pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], img0.shape).round()
-                results.append(Results(img0, self.path, self.labels, boxes=pred))
-
-            det = results[0].boxes
-            if len(det) == 0:
-                return [{"status": "No detection found", "inference_time": inference_time}]
-            
-            for c in det.cls.unique():
-                n = (det.cls == c).sum()  # detections per class
-                log_string += f"{n} {self.labels[int(c)]}{'s' * (n > 1)}, "
-
-            raw_output = ''
-            for d in reversed(det):
-                cls, conf = d.cls.squeeze(), d.conf.squeeze()
-                c = int(cls)  # integer class
-                name = f'id:{int(d.id.item())} {self.labels[c]}' if d.id is not None else self.labels[c]
-                box = d.xyxy.squeeze().tolist()
-                p1, p2 = (int(box[0]), int(box[1])), (int(box[2]), int(box[3]))
-                raw_output += f"name: {name}, confidence: {conf:.2f}, start_point: {p1}, end_point:{p2}\n"
+            #raw_output = ''
+            raw_output = prediction
 
             return [{
                 "inference_time": inference_time,
-                "inference_summary": log_string,
                 "raw_output": raw_output
             }]
         return None
